@@ -1,0 +1,108 @@
+name: Daily Agent Task Runner
+
+# Reusable workflow. Consumer repos call this via:
+#   jobs:
+#     run:
+#       uses: anubhab-m02/automation-kit/.github/workflows/daily-agent.yml@main
+#       secrets:
+#         ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+#
+# Design: skip entirely if the backlog is empty (zero cost), otherwise pick the
+# single oldest open `daily-task` issue, implement it inside a bounded turn/tool
+# budget, and open a PR. Never pushes to the default branch directly.
+
+on:
+  workflow_call:
+    inputs:
+      max_turns:
+        description: "Max agent turns per run (budget cap)"
+        required: false
+        type: number
+        default: 60
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: true
+
+jobs:
+  find-task:
+    runs-on: ubuntu-latest
+    outputs:
+      has_task: ${{ steps.pick.outputs.has_task }}
+      issue_number: ${{ steps.pick.outputs.issue_number }}
+      issue_title: ${{ steps.pick.outputs.issue_title }}
+    steps:
+      - name: Pick oldest open daily-task issue
+        id: pick
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          issue=$(gh issue list --repo "${{ github.repository }}" \
+            --label daily-task --state open \
+            --json number,title \
+            --jq 'sort_by(.number) | .[0] // empty')
+          if [ -z "$issue" ]; then
+            echo "No open daily-task issues — skipping run."
+            echo "has_task=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_task=true" >> "$GITHUB_OUTPUT"
+            echo "issue_number=$(echo "$issue" | jq -r '.number')" >> "$GITHUB_OUTPUT"
+            echo "issue_title=$(echo "$issue" | jq -r '.title')" >> "$GITHUB_OUTPUT"
+          fi
+
+  run-agent:
+    needs: find-task
+    if: needs.find-task.outputs.has_task == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git identity
+        run: |
+          git config --global user.name "${{ github.repository_owner }}"
+          git config --global user.email "${{ github.repository_owner }}@users.noreply.github.com"
+
+      - name: Run Claude Code on issue #${{ needs.find-task.outputs.issue_number }}
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          track_progress: true
+          claude_args: >-
+            --max-turns ${{ inputs.max_turns }}
+            --allowedTools "Read,Edit,Write,Glob,Grep,Bash(git *),Bash(gh *),Bash(npm *),Bash(pytest *),Bash(python *)"
+          prompt: |
+            You are the unattended daily contributor for this repository, working from
+            issue #${{ needs.find-task.outputs.issue_number }} ("${{ needs.find-task.outputs.issue_title }}").
+
+            Ground rules:
+            1. Read CLAUDE.md and ROADMAP.md first for project context and conventions.
+               Read only the files that this issue references or that are clearly required
+               to implement it — do not explore the whole repository speculatively.
+            2. Implement ONLY the scope of this one issue. Do not refactor, "clean up", or
+               touch unrelated code.
+            3. Break the work into small, logically separate git commits (e.g. scaffold,
+               core implementation, tests, docs) — a natural decomposition of the real
+               work, not an arbitrary count.
+            4. Never commit directly to the default branch. Create a branch named
+               `daily/issue-${{ needs.find-task.outputs.issue_number }}`, push it, and open
+               a pull request that references "Closes #${{ needs.find-task.outputs.issue_number }}".
+            5. Do not add any AI/bot attribution to commits or the PR body (no
+               "Co-Authored-By: Claude", no mention of AI authorship). Git identity is
+               already configured to the repository owner.
+            6. If you hit a genuine ambiguity, a design decision only a human should make,
+               a missing credential, or discover the issue is materially bigger than
+               scoped: stop. Open a draft PR (or comment on the issue) clearly explaining
+               what decision or input is needed, and label the issue `needs-input`. Do not
+               guess on judgment calls.
+            7. If, while implementing this issue, you notice one clearly-scoped piece of
+               genuinely meaningful follow-up work — not busywork — you may open at most
+               ONE new issue for it, labeled `needs-triage` (never `daily-task` directly).
+               If nothing meaningful comes to mind, don't force one.
+            8. Keep the diff proportional to the issue — this is a small daily task, not a
+               rewrite.
