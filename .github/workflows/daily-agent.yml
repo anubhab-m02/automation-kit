@@ -26,6 +26,12 @@ on:
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN:
         required: true
+      # Optional fine-grained PAT belonging to the repo owner. When set, PRs,
+      # comments, and labels are created as the owner instead of the Claude
+      # GitHub App identity. Scope it to the consumer repo(s) with contents,
+      # pull-requests, and issues read/write only.
+      GH_PAT:
+        required: false
 
 jobs:
   find-task:
@@ -77,6 +83,7 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GH_PAT }}
           bot_name: ${{ github.repository_owner }}
           bot_id: ${{ github.repository_owner_id }}
           claude_args: >-
