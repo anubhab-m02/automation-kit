@@ -81,7 +81,7 @@ jobs:
           bot_id: ${{ github.repository_owner_id }}
           claude_args: >-
             --max-turns ${{ inputs.max_turns }}
-            --allowedTools "Read,Edit,Write,Glob,Grep,Bash(git *),Bash(gh *),Bash(npm *),Bash(pytest *),Bash(python *)"
+            --allowedTools "Read,Edit,Write,Glob,Grep,Bash(git *),Bash(gh *),Bash(npm *),Bash(pip *),Bash(pytest *),Bash(python *)"
           prompt: |
             You are the unattended daily contributor for this repository, working from
             issue #${{ needs.find-task.outputs.issue_number }} ("${{ needs.find-task.outputs.issue_title }}").
