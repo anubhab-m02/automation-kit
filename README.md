@@ -67,12 +67,15 @@ Guardrails baked into [`daily-agent.yml`](.github/workflows/daily-agent.yml):
    as a `CLAUDE_CODE_OAUTH_TOKEN` secret on the target repo (Settings →
    Secrets and variables → Actions). Usage draws from the subscription,
    not pay-per-token billing.
-6. Because this repo (`automation-kit`) is private, the target repo needs
-   explicit access to call its reusable workflow: in **this** repo, go to
-   Settings → Actions → General → Access, and allow the target repo (or
-   "repositories owned by this account"). Without this the caller workflow
-   fails with a permissions error on the `uses:` step.
-7. Test with a manual `workflow_dispatch` run before trusting the cron.
+6. Test with a manual `workflow_dispatch` run before trusting the cron.
+
+This repo is public specifically so the `uses:` reference above resolves
+without any cross-repo access configuration — private reusable workflows
+don't reliably resolve across repos owned by a personal (non-organization)
+GitHub account, even with the "Access" setting configured correctly, so
+public is the simpler and more robust choice here. Nothing in this repo is
+sensitive (no secrets, no proprietary logic — just workflow design and a
+prompt).
 
 ## Auth: subscription OAuth token, not API billing
 
