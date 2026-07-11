@@ -6,14 +6,26 @@ name: Daily Agent Task Runner
 #       uses: anubhab-m02/automation-kit/.github/workflows/daily-agent.yml@main
 #       secrets:
 #         CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+#         GH_PAT: ${{ secrets.GH_PAT }}
 #
 # Auth: uses a Claude Pro/Max subscription OAuth token (generated locally via
 # `claude setup-token`), not a metered Anthropic API key — usage draws from
-# the subscription, not pay-per-token billing.
+# the subscription, not pay-per-token billing. GH_PAT (a fine-grained PAT
+# owned by the repo owner, scoped to contents/PRs/issues read-write) makes
+# PRs, comments, and labels land as the owner instead of the Claude GitHub
+# App identity — set it if you don't want an app identity showing up at all.
 #
-# Design: skip entirely if the backlog is empty (zero cost), otherwise pick the
-# single oldest open `daily-task` issue, implement it inside a bounded turn/tool
-# budget, and open a PR. Never pushes to the default branch directly.
+# Design: rolling-branch delivery. Skip entirely if the backlog is empty
+# (zero cost). Otherwise: fast-forward `agent/rolling` onto `main` (creating
+# it from main if absent), attempt up to 3 eligible `daily-task` issues
+# (priority-labeled first, then lowest issue number) inside a bounded
+# turn/tool budget, commit each completed issue separately, label it
+# `in-pr`, and open or update the single rolling PR from `agent/rolling` to
+# `main`. Never pushes to the default branch directly — only merging that
+# PR does, and only a human does that.
+#
+# Issue labels this convention relies on (create these in the consumer
+# repo): daily-task, priority, in-pr, needs-input, needs-triage.
 
 on:
   workflow_call:
@@ -22,14 +34,20 @@ on:
         description: "Max agent turns per run (budget cap)"
         required: false
         type: number
-        default: 60
+        default: 100
+      max_issues:
+        description: "Max issues to attempt in one run"
+        required: false
+        type: number
+        default: 3
+      rolling_branch:
+        description: "Name of the long-lived branch the agent accumulates work on"
+        required: false
+        type: string
+        default: "agent/rolling"
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN:
         required: true
-      # Optional fine-grained PAT belonging to the repo owner. When set, PRs,
-      # comments, and labels are created as the owner instead of the Claude
-      # GitHub App identity. Scope it to the consumer repo(s) with contents,
-      # pull-requests, and issues read/write only.
       GH_PAT:
         required: false
 
@@ -38,27 +56,49 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       has_task: ${{ steps.pick.outputs.has_task }}
-      issue_number: ${{ steps.pick.outputs.issue_number }}
-      issue_title: ${{ steps.pick.outputs.issue_title }}
+      candidates: ${{ steps.pick.outputs.candidates }}
+      rolling_pr: ${{ steps.pick.outputs.rolling_pr }}
     steps:
-      - name: Pick oldest open daily-task issue
+      - name: Pick eligible daily-task issues
         id: pick
         env:
           GH_TOKEN: ${{ github.token }}
+          MAX_ISSUES: ${{ inputs.max_issues }}
+          ROLLING_BRANCH: ${{ inputs.rolling_branch }}
         run: |
           set -euo pipefail
-          issue=$(gh issue list --repo "${{ github.repository }}" \
+
+          # Eligible: open + daily-task, minus in-pr, minus needs-input.
+          # Priority-labeled issues first, then lowest issue number.
+          all=$(gh issue list --repo "${{ github.repository }}" \
             --label daily-task --state open \
-            --json number,title \
-            --jq 'sort_by(.number) | .[0] // empty')
-          if [ -z "$issue" ]; then
-            echo "No open daily-task issues — skipping run."
+            --json number,title,labels)
+
+          eligible=$(echo "$all" | jq -c '
+            [ .[] | select(
+                (.labels | map(.name) | index("in-pr") | not) and
+                (.labels | map(.name) | index("needs-input") | not)
+              ) ]
+            | sort_by(.number)
+            | (map(select(.labels | map(.name) | index("priority"))) +
+               map(select(.labels | map(.name) | index("priority") | not)))
+          ')
+
+          candidates=$(echo "$eligible" | jq -c --argjson n "$MAX_ISSUES" '[.[:$n][] | {number, title}]')
+          count=$(echo "$candidates" | jq 'length')
+
+          if [ "$count" -eq 0 ]; then
+            echo "No eligible daily-task issues — skipping run."
             echo "has_task=false" >> "$GITHUB_OUTPUT"
           else
             echo "has_task=true" >> "$GITHUB_OUTPUT"
-            echo "issue_number=$(echo "$issue" | jq -r '.number')" >> "$GITHUB_OUTPUT"
-            echo "issue_title=$(echo "$issue" | jq -r '.title')" >> "$GITHUB_OUTPUT"
+            echo "candidates=$candidates" >> "$GITHUB_OUTPUT"
           fi
+
+          rolling_pr=$(gh pr list --repo "${{ github.repository }}" \
+            --head "$ROLLING_BRANCH" --state open \
+            --json number --jq '.[0].number // empty')
+          echo "rolling_pr=$rolling_pr" >> "$GITHUB_OUTPUT"
 
   run-agent:
     needs: find-task
@@ -74,12 +114,29 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Configure git identity
+      - name: Prepare rolling branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ROLLING_BRANCH: ${{ inputs.rolling_branch }}
         run: |
+          set -euo pipefail
           git config --global user.name "${{ github.repository_owner }}"
           git config --global user.email "${{ github.repository_owner }}@users.noreply.github.com"
 
-      - name: Run Claude Code on issue #${{ needs.find-task.outputs.issue_number }}
+          default_branch=$(gh repo view "${{ github.repository }}" --json defaultBranchRef --jq '.defaultBranchRef.name')
+
+          if git ls-remote --exit-code --heads origin "$ROLLING_BRANCH" >/dev/null 2>&1; then
+            git checkout -B "$ROLLING_BRANCH" "origin/$ROLLING_BRANCH"
+            # Bring in anything merged/pushed to the default branch since agent/rolling last moved.
+            git merge --no-edit "origin/$default_branch" || {
+              echo "::error::$ROLLING_BRANCH has a conflict merging $default_branch that needs human resolution."
+              exit 1
+            }
+          else
+            git checkout -B "$ROLLING_BRANCH"
+          fi
+
+      - name: Run Claude Code
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -90,32 +147,56 @@ jobs:
             --max-turns ${{ inputs.max_turns }}
             --allowedTools "Read,Edit,Write,Glob,Grep,Bash(git *),Bash(gh *),Bash(npm *),Bash(pip *),Bash(pytest *),Bash(python *)"
           prompt: |
-            You are the unattended daily contributor for this repository, working from
-            issue #${{ needs.find-task.outputs.issue_number }} ("${{ needs.find-task.outputs.issue_title }}").
+            You are the unattended daily contributor for this repository. You work on
+            the branch `${{ inputs.rolling_branch }}` (already checked out and up to
+            date with the default branch) — this branch accumulates work across many
+            unattended runs until a human reviews and merges it, so day-to-day progress
+            does not depend on that merge happening.
+
+            Candidate issues, in the order you should attempt them (priority-labeled
+            issues first, then lowest number first):
+            ${{ needs.find-task.outputs.candidates }}
+
+            Existing rolling PR number (empty if none yet): "${{ needs.find-task.outputs.rolling_pr }}"
 
             Ground rules:
-            1. Read CLAUDE.md and ROADMAP.md first for project context and conventions.
-               Read only the files that this issue references or that are clearly required
-               to implement it — do not explore the whole repository speculatively.
-            2. Implement ONLY the scope of this one issue. Do not refactor, "clean up", or
-               touch unrelated code.
-            3. Break the work into small, logically separate git commits (e.g. scaffold,
-               core implementation, tests, docs) — a natural decomposition of the real
-               work, not an arbitrary count.
-            4. Never commit directly to the default branch. Create a branch named
-               `daily/issue-${{ needs.find-task.outputs.issue_number }}`, push it, and open
-               a pull request that references "Closes #${{ needs.find-task.outputs.issue_number }}".
-            5. Do not add any AI/bot attribution to commits or the PR body (no
-               "Co-Authored-By: Claude", no mention of AI authorship). Git identity is
-               already configured to the repository owner.
-            6. If you hit a genuine ambiguity, a design decision only a human should make,
-               a missing credential, or discover the issue is materially bigger than
-               scoped: stop. Open a draft PR (or comment on the issue) clearly explaining
-               what decision or input is needed, and label the issue `needs-input`. Do not
-               guess on judgment calls.
-            7. If, while implementing this issue, you notice one clearly-scoped piece of
+            1. Read CLAUDE.md, ROADMAP.md, and docs/ARCHITECTURE.md first for project
+               context and conventions. For each issue, read only the files it
+               references or that are clearly required to implement it — do not explore
+               the whole repository speculatively.
+            2. Work through the candidates in the given order. Complete between 1 and
+               ${{ inputs.max_issues }} of them, stopping cleanly after finishing your
+               current issue if you're running low on turn budget — never leave an issue
+               half-implemented. It is fine and expected to complete fewer than the
+               listed candidates.
+            3. For each issue: implement ONLY its scope (no unrelated refactors), commit
+               it as its own small set of logically separate commits (e.g. scaffold,
+               core implementation, tests), then label that issue `in-pr` via
+               `gh issue edit <n> --add-label in-pr` — do not close it, the rolling PR's
+               "Closes #n" list will close it on merge.
+            4. Never commit directly to the default branch — you are already on
+               `${{ inputs.rolling_branch }}`. After completing each issue, push the
+               branch immediately (don't batch pushes until the very end) so progress
+               survives even if a later issue in this run fails.
+            5. PR management: if the existing rolling PR number above is non-empty,
+               update that PR's body to append `Closes #n` for each issue you completed
+               this run (keep existing entries, don't remove any) and add a short
+               changelog line. If it's empty, open a new PR from
+               `${{ inputs.rolling_branch }}` to the default branch titled
+               "Daily agent progress", with a body listing `Closes #n` for each issue
+               completed so far.
+            6. Do not add any AI/bot attribution to commits, PR bodies, or issue
+               comments (no "Co-Authored-By: Claude", no mention of AI authorship). Git
+               identity is already configured to the repository owner.
+            7. If a candidate issue has a genuine ambiguity, a design decision only a
+               human should make, a missing credential, or is materially bigger than
+               scoped: stop working on that issue specifically, comment on it explaining
+               what's needed, label it `needs-input`, and move on to the next candidate
+               instead. Do not guess on judgment calls.
+            8. If, while implementing an issue, you notice one clearly-scoped piece of
                genuinely meaningful follow-up work — not busywork — you may open at most
-               ONE new issue for it, labeled `needs-triage` (never `daily-task` directly).
-               If nothing meaningful comes to mind, don't force one.
-            8. Keep the diff proportional to the issue — this is a small daily task, not a
-               rewrite.
+               ONE new issue for the whole run, labeled `needs-triage` (never
+               `daily-task` directly). If nothing meaningful comes to mind, don't force
+               one.
+            9. Keep each issue's diff proportional to its scope — these are small daily
+               tasks, not a rewrite.
