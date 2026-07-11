@@ -5,7 +5,11 @@ name: Daily Agent Task Runner
 #     run:
 #       uses: anubhab-m02/automation-kit/.github/workflows/daily-agent.yml@main
 #       secrets:
-#         ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+#         CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+#
+# Auth: uses a Claude Pro/Max subscription OAuth token (generated locally via
+# `claude setup-token`), not a metered Anthropic API key — usage draws from
+# the subscription, not pay-per-token billing.
 #
 # Design: skip entirely if the backlog is empty (zero cost), otherwise pick the
 # single oldest open `daily-task` issue, implement it inside a bounded turn/tool
@@ -20,7 +24,7 @@ on:
         type: number
         default: 60
     secrets:
-      ANTHROPIC_API_KEY:
+      CLAUDE_CODE_OAUTH_TOKEN:
         required: true
 
 jobs:
@@ -71,7 +75,7 @@ jobs:
       - name: Run Claude Code on issue #${{ needs.find-task.outputs.issue_number }}
         uses: anthropics/claude-code-action@v1
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           track_progress: true
           claude_args: >-
             --max-turns ${{ inputs.max_turns }}

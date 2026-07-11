@@ -59,11 +59,14 @@ Guardrails baked into [`daily-agent.yml`](.github/workflows/daily-agent.yml):
      run:
        uses: anubhab-m02/automation-kit/.github/workflows/daily-agent.yml@main
        secrets:
-         ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+         CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
    ```
 
-5. Add an `ANTHROPIC_API_KEY` secret to the target repo (Settings →
-   Secrets and variables → Actions).
+5. Generate an OAuth token from your Claude Pro/Max subscription (not a
+   metered API key) by running `claude setup-token` locally, then add it
+   as a `CLAUDE_CODE_OAUTH_TOKEN` secret on the target repo (Settings →
+   Secrets and variables → Actions). Usage draws from the subscription,
+   not pay-per-token billing.
 6. Because this repo (`automation-kit`) is private, the target repo needs
    explicit access to call its reusable workflow: in **this** repo, go to
    Settings → Actions → General → Access, and allow the target repo (or
@@ -71,10 +74,24 @@ Guardrails baked into [`daily-agent.yml`](.github/workflows/daily-agent.yml):
    fails with a permissions error on the `uses:` step.
 7. Test with a manual `workflow_dispatch` run before trusting the cron.
 
-## Model/cost tiering
+## Auth: subscription OAuth token, not API billing
 
-Default model is whatever `claude_args`/the action defaults to (cheapest
-suitable tier). For issues that need stronger reasoning, add a
-`model:opus` label convention in the target repo and extend the caller
-workflow to branch `claude_args` accordingly — not implemented by default
-to keep the base case cheap.
+This kit authenticates via a Claude Pro/Max subscription OAuth token
+(`claude setup-token` → `CLAUDE_CODE_OAUTH_TOKEN` secret), not a metered
+`anthropic_api_key`. Two things worth knowing:
+
+- The token is tied to your personal subscription's usage allowance, which
+  is designed around interactive use. Running this daily against several
+  repos shares that same allowance — if you hit subscription rate limits,
+  a run will fail rather than bill overage; check `gh run list` if a
+  scheduled run goes missing.
+- A couple of action features (e.g. inline PR-comment classification) are
+  documented as API-key-only and are skipped under OAuth token auth — not
+  used by this kit's daily-task flow, so no impact here.
+
+## Model tiering
+
+Default model is whatever the subscription/action defaults to. For issues
+that need stronger reasoning, add a `model:opus` label convention in the
+target repo and extend the caller workflow to branch `claude_args`
+accordingly — not implemented by default to keep the base case simple.
