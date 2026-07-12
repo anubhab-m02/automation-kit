@@ -45,6 +45,16 @@ on:
         required: false
         type: string
         default: "agent/rolling"
+      random_window_minutes:
+        description: >-
+          On scheduled (cron) runs only, sleep a random amount up to this many
+          minutes before doing anything, so the actual work-start time varies
+          day to day instead of landing at a fixed clock time. Set the cron
+          trigger to the start of your target window and this to the window's
+          length. Ignored on manual (workflow_dispatch) runs.
+        required: false
+        type: number
+        default: 180
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN:
         required: true
@@ -59,6 +69,16 @@ jobs:
       candidates: ${{ steps.pick.outputs.candidates }}
       rolling_pr: ${{ steps.pick.outputs.rolling_pr }}
     steps:
+      - name: Randomize start time within the target window
+        if: github.event_name == 'schedule'
+        env:
+          WINDOW_MINUTES: ${{ inputs.random_window_minutes }}
+        run: |
+          set -euo pipefail
+          sleep_secs=$(( RANDOM % (WINDOW_MINUTES * 60) ))
+          echo "Sleeping ${sleep_secs}s (up to ${WINDOW_MINUTES}m window) before starting..."
+          sleep "$sleep_secs"
+
       - name: Pick eligible daily-task issues
         id: pick
         env:
