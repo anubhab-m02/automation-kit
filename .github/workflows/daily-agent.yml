@@ -198,13 +198,17 @@ jobs:
                `${{ inputs.rolling_branch }}`. After completing each issue, push the
                branch immediately (don't batch pushes until the very end) so progress
                survives even if a later issue in this run fails.
-            5. PR management: if the existing rolling PR number above is non-empty,
-               update that PR's body to append `Closes #n` for each issue you completed
-               this run (keep existing entries, don't remove any) and add a short
-               changelog line. If it's empty, open a new PR from
-               `${{ inputs.rolling_branch }}` to the default branch titled
-               "Daily agent progress", with a body listing `Closes #n` for each issue
-               completed so far.
+            5. PR management: the PR title must describe the actual work it contains, not
+               a generic label like "Daily agent progress" — e.g. "Backend foundation:
+               config, models, Chroma store" or "GitHub ingestion client + fixtures".
+               If the existing rolling PR number above is non-empty, update that PR's
+               body to append `Closes #n` for each issue you completed this run (keep
+               existing entries, don't remove any), add a short changelog line, and
+               update the PR title to summarize the PR's full current contents (not just
+               this run's additions) if the title no longer fits after this run's work.
+               If it's empty, open a new PR from `${{ inputs.rolling_branch }}` to the
+               default branch with a body listing `Closes #n` for each issue completed
+               so far and a title summarizing this run's work.
             6. Do not add any AI/bot attribution to commits, PR bodies, or issue
                comments (no "Co-Authored-By: Claude", no mention of AI authorship). Git
                identity is already configured to the repository owner.
