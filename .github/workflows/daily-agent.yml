@@ -90,8 +90,12 @@ jobs:
 
           # Eligible: open + daily-task, minus in-pr, minus needs-input.
           # Priority-labeled issues first, then lowest issue number.
+          # --limit is required: gh issue list defaults to 30 results sorted
+          # newest-created-first, which silently drops the oldest (lowest-
+          # numbered, highest-priority) issues once the backlog grows past
+          # 30 — exactly the issues this picker is supposed to favor.
           all=$(gh issue list --repo "${{ github.repository }}" \
-            --label daily-task --state open \
+            --label daily-task --state open --limit 1000 \
             --json number,title,labels)
 
           eligible=$(echo "$all" | jq -c '
