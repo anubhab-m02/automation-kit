@@ -34,7 +34,7 @@ on:
         description: "Max agent turns per run (budget cap)"
         required: false
         type: number
-        default: 100
+        default: 150
       max_issues:
         description: "Max issues to attempt in one run"
         required: false
@@ -169,7 +169,7 @@ jobs:
           bot_id: ${{ github.repository_owner_id }}
           claude_args: >-
             --max-turns ${{ inputs.max_turns }}
-            --allowedTools "Read,Edit,Write,Glob,Grep,Bash(git *),Bash(gh *),Bash(npm *),Bash(pip *),Bash(pytest *),Bash(python *)"
+            --allowedTools "Read,Edit,Write,Glob,Grep,Bash(git *),Bash(gh *),Bash(npm *),Bash(pip *),Bash(pytest *),Bash(python *),Bash(ls *),Bash(cat *),Bash(find *),Bash(mkdir *),Bash(mv *)"
           prompt: |
             You are the unattended daily contributor for this repository. You work on
             the branch `${{ inputs.rolling_branch }}` (already checked out and up to
