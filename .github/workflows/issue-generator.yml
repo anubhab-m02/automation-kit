@@ -1,0 +1,106 @@
+name: Issue Generator
+
+# Reusable workflow. The scrum master: reads ROADMAP.md as the
+# Brainstormer left it plus the latest review report (parsed
+# deterministically, not re-judged), dedups against all existing issue
+# history before filing anything, and sets priority from the report's
+# own stated severity rather than re-deriving it.
+
+on:
+  workflow_call:
+    inputs:
+      max_turns:
+        required: false
+        type: number
+        default: 100
+      random_window_minutes:
+        required: false
+        type: number
+        default: 180
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: true
+      GH_PAT:
+        required: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Randomize start time within the target window
+        if: github.event_name == 'schedule'
+        env:
+          WINDOW_MINUTES: ${{ inputs.random_window_minutes }}
+        run: |
+          set -euo pipefail
+          sleep_secs=$(( RANDOM % (WINDOW_MINUTES * 60) ))
+          sleep "$sleep_secs"
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Deterministically parse the latest report's severities
+        id: parse
+        run: |
+          set -euo pipefail
+          latest=$(ls -1 docs/superpowers/reports/*.md 2>/dev/null | grep -v TEMPLATE.md | sort | tail -1 || true)
+          if [ -z "$latest" ]; then
+            echo "summary={}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          curl -sf -o /tmp/parse_review_report.py \
+            https://raw.githubusercontent.com/anubhab-m02/automation-kit/main/scripts/parse_review_report.py
+          pip install --quiet pyyaml
+          summary=$(python3 -c "
+          import sys, json
+          sys.path.insert(0, '/tmp')
+          from parse_review_report import parse_review_report
+          report = parse_review_report(open('$latest').read())
+          print(json.dumps({
+              'date': report.date,
+              'verdicts': [v.__dict__ for v in report.verdicts],
+              'findings': [f.__dict__ for f in report.findings],
+          }))
+          ")
+          echo "summary=$summary" >> "$GITHUB_OUTPUT"
+
+      - name: File and update issues from ROADMAP.md and the latest report
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GH_PAT }}
+          bot_name: ${{ github.repository_owner }}
+          bot_id: ${{ github.repository_owner_id }}
+          allowedTools: "Read,Grep,Glob,Bash(git *),Bash(gh *)"
+          claude_args: --max-turns ${{ inputs.max_turns }}
+          prompt: |
+            You are the scrum master for this repository, running once a day.
+
+            The latest review report has already been parsed deterministically —
+            trust this structure for verdicts/severity rather than re-reading and
+            re-judging the report file's prose yourself:
+
+            ${{ steps.parse.outputs.summary }}
+
+            1. Read ROADMAP.md in full.
+            2. Before filing ANY new issue, check it doesn't already exist: run
+               `gh issue list --repo ${{ github.repository }} --state all --search "<key terms>"`
+               for each candidate and skip filing if a matching issue (open OR
+               closed) already covers it.
+            3. For each ROADMAP.md item with no existing issue: file a `daily-task`
+               issue with exact files to touch and acceptance criteria checkable by
+               pytest/npm test, per this repo's binding issue-sizing rules (see
+               ROADMAP.md's Delivery model section).
+            4. For each `finding` in the parsed structure above with `severity:
+               major`: file it as a `daily-task` issue and also add the `priority`
+               label. For `severity: minor`: file as a plain `daily-task`, no
+               `priority` label. Take severity from the parsed structure exactly as
+               given — do not re-judge it yourself.
+            5. For any existing issue the parsed `verdicts`/`findings` indicate is now
+               resolved or no longer applicable, close it with a comment citing which
+               report/PR resolved it.
+
+            Do not create more than 10 new issues in a single run — if there is more
+            backlog than that, file the 10 most load-bearing (fewest dependencies on
+            things not yet built) and leave the rest for tomorrow's run.
