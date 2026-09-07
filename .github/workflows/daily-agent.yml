@@ -4,6 +4,8 @@ name: Daily Agent Task Runner
 #   jobs:
 #     run:
 #       uses: anubhab-m02/automation-kit/.github/workflows/daily-agent.yml@main
+#       with:
+#         mode: new-issues  # or resolve-comments
 #       secrets:
 #         CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
 #         GH_PAT: ${{ secrets.GH_PAT }}
@@ -15,14 +17,19 @@ name: Daily Agent Task Runner
 # PRs, comments, and labels land as the owner instead of the Claude GitHub
 # App identity — set it if you don't want an app identity showing up at all.
 #
-# Design: rolling-branch delivery. Skip entirely if the backlog is empty
-# (zero cost). Otherwise: fast-forward `agent/rolling` onto `main` (creating
-# it from main if absent), attempt up to 3 eligible `daily-task` issues
-# (priority-labeled first, then lowest issue number) inside a bounded
-# turn/tool budget, commit each completed issue separately, label it
-# `in-pr`, and open or update the single rolling PR from `agent/rolling` to
-# `main`. Never pushes to the default branch directly — only merging that
-# PR does, and only a human does that.
+# Design: independent per-issue delivery, not a shared rolling branch. Each
+# attempted issue gets its own branch (`issue/<n>-<slug>`) and its own PR,
+# so one issue's problem (a failed review, a blocked merge) never blocks
+# another issue's progress. A separate Reviewer automation decides whether
+# each PR merges — this workflow never merges anything itself.
+#
+# Two invocation modes, chosen via the `mode` input:
+#   - `new-issues` (default): picks up to `max_issues` eligible `daily-task`
+#     issues and opens one PR per issue.
+#   - `resolve-comments`: finds open PRs with review changes requested and
+#     pushes fixes to their existing branches. Never picks up new issues.
+#     Meant to be triggered by the Reviewer's own completion, not scheduled
+#     independently — see the automation org design doc.
 #
 # Issue labels this convention relies on (create these in the consumer
 # repo): daily-task, priority, in-pr, needs-input, needs-triage.
@@ -36,15 +43,15 @@ on:
         type: number
         default: 150
       max_issues:
-        description: "Max issues to attempt in one run"
+        description: "Max issues to attempt in one new-issues run"
         required: false
         type: number
         default: 3
-      rolling_branch:
-        description: "Name of the long-lived branch the agent accumulates work on"
+      mode:
+        description: "'new-issues' (default) or 'resolve-comments'"
         required: false
         type: string
-        default: "agent/rolling"
+        default: "new-issues"
       random_window_minutes:
         description: >-
           On scheduled (cron) runs only, sleep a random amount up to this many
@@ -63,11 +70,11 @@ on:
 
 jobs:
   find-task:
+    if: inputs.mode == 'new-issues'
     runs-on: ubuntu-latest
     outputs:
       has_task: ${{ steps.pick.outputs.has_task }}
       candidates: ${{ steps.pick.outputs.candidates }}
-      rolling_pr: ${{ steps.pick.outputs.rolling_pr }}
     steps:
       - name: Randomize start time within the target window
         if: github.event_name == 'schedule'
@@ -84,7 +91,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           MAX_ISSUES: ${{ inputs.max_issues }}
-          ROLLING_BRANCH: ${{ inputs.rolling_branch }}
         run: |
           set -euo pipefail
 
@@ -119,14 +125,9 @@ jobs:
             echo "candidates=$candidates" >> "$GITHUB_OUTPUT"
           fi
 
-          rolling_pr=$(gh pr list --repo "${{ github.repository }}" \
-            --head "$ROLLING_BRANCH" --state open \
-            --json number --jq '.[0].number // empty')
-          echo "rolling_pr=$rolling_pr" >> "$GITHUB_OUTPUT"
-
   run-agent:
     needs: find-task
-    if: needs.find-task.outputs.has_task == 'true'
+    if: inputs.mode == 'new-issues' && needs.find-task.outputs.has_task == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -138,27 +139,10 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Prepare rolling branch
-        env:
-          GH_TOKEN: ${{ github.token }}
-          ROLLING_BRANCH: ${{ inputs.rolling_branch }}
+      - name: Configure git identity
         run: |
-          set -euo pipefail
           git config --global user.name "${{ github.repository_owner }}"
           git config --global user.email "${{ github.repository_owner }}@users.noreply.github.com"
-
-          default_branch=$(gh repo view "${{ github.repository }}" --json defaultBranchRef --jq '.defaultBranchRef.name')
-
-          if git ls-remote --exit-code --heads origin "$ROLLING_BRANCH" >/dev/null 2>&1; then
-            git checkout -B "$ROLLING_BRANCH" "origin/$ROLLING_BRANCH"
-            # Bring in anything merged/pushed to the default branch since agent/rolling last moved.
-            git merge --no-edit "origin/$default_branch" || {
-              echo "::error::$ROLLING_BRANCH has a conflict merging $default_branch that needs human resolution."
-              exit 1
-            }
-          else
-            git checkout -B "$ROLLING_BRANCH"
-          fi
 
       - name: Run Claude Code
         uses: anthropics/claude-code-action@v1
@@ -171,60 +155,94 @@ jobs:
             --max-turns ${{ inputs.max_turns }}
             --allowedTools "Read,Edit,Write,Glob,Grep,Bash(git *),Bash(gh *),Bash(npm *),Bash(pip *),Bash(pytest *),Bash(python *),Bash(ls *),Bash(cat *),Bash(find *),Bash(mkdir *),Bash(mv *)"
           prompt: |
-            You are the unattended daily contributor for this repository. You work on
-            the branch `${{ inputs.rolling_branch }}` (already checked out and up to
-            date with the default branch) — this branch accumulates work across many
-            unattended runs until a human reviews and merges it, so day-to-day progress
-            does not depend on that merge happening.
+            You are the unattended daily contributor for this repository. Each issue
+            you attempt gets its OWN branch and its OWN pull request — not a shared
+            branch — so that one issue's problem never blocks another's.
 
             Candidate issues, in the order you should attempt them (priority-labeled
             issues first, then lowest number first):
             ${{ needs.find-task.outputs.candidates }}
 
-            Existing rolling PR number (empty if none yet): "${{ needs.find-task.outputs.rolling_pr }}"
-
             Ground rules:
             1. Read CLAUDE.md, ROADMAP.md, and docs/ARCHITECTURE.md first for project
                context and conventions. For each issue, read only the files it
-               references or that are clearly required to implement it — do not explore
-               the whole repository speculatively.
-            2. Work through the candidates in the given order. Complete between 1 and
-               ${{ inputs.max_issues }} of them, stopping cleanly after finishing your
-               current issue if you're running low on turn budget — never leave an issue
-               half-implemented. It is fine and expected to complete fewer than the
-               listed candidates.
-            3. For each issue: implement ONLY its scope (no unrelated refactors), commit
-               it as its own small set of logically separate commits (e.g. scaffold,
-               core implementation, tests), then label that issue `in-pr` via
-               `gh issue edit <n> --add-label in-pr` — do not close it, the rolling PR's
-               "Closes #n" list will close it on merge.
-            4. Never commit directly to the default branch — you are already on
-               `${{ inputs.rolling_branch }}`. After completing each issue, push the
-               branch immediately (don't batch pushes until the very end) so progress
-               survives even if a later issue in this run fails.
-            5. PR management: the PR title must describe the actual work it contains, not
-               a generic label like "Daily agent progress" — e.g. "Backend foundation:
-               config, models, Chroma store" or "GitHub ingestion client + fixtures".
-               If the existing rolling PR number above is non-empty, update that PR's
-               body to append `Closes #n` for each issue you completed this run (keep
-               existing entries, don't remove any), add a short changelog line, and
-               update the PR title to summarize the PR's full current contents (not just
-               this run's additions) if the title no longer fits after this run's work.
-               If it's empty, open a new PR from `${{ inputs.rolling_branch }}` to the
-               default branch with a body listing `Closes #n` for each issue completed
-               so far and a title summarizing this run's work.
-            6. Do not add any AI/bot attribution to commits, PR bodies, or issue
-               comments (no "Co-Authored-By: Claude", no mention of AI authorship). Git
-               identity is already configured to the repository owner.
-            7. If a candidate issue has a genuine ambiguity, a design decision only a
-               human should make, a missing credential, or is materially bigger than
-               scoped: stop working on that issue specifically, comment on it explaining
-               what's needed, label it `needs-input`, and move on to the next candidate
-               instead. Do not guess on judgment calls.
-            8. If, while implementing an issue, you notice one clearly-scoped piece of
-               genuinely meaningful follow-up work — not busywork — you may open at most
-               ONE new issue for the whole run, labeled `needs-triage` (never
-               `daily-task` directly). If nothing meaningful comes to mind, don't force
-               one.
-            9. Keep each issue's diff proportional to its scope — these are small daily
-               tasks, not a rewrite.
+               references or that are clearly required to implement it.
+            2. For EACH issue you attempt: fetch and check out the default branch
+               fresh, create a new branch named `issue/<number>-<short-slug>` from
+               it (never branch from a previous issue's branch in this same run),
+               implement ONLY that issue's scope, commit it as its own small set of
+               logically separate commits, push that branch, and open a NEW pull
+               request from it to the default branch with a title describing the
+               actual change and a body containing `Closes #<number>`. Do not touch
+               any other issue's branch or PR.
+            3. Complete between 1 and ${{ inputs.max_issues }} issues, stopping
+               cleanly after finishing your current issue if running low on turn
+               budget — never leave an issue half-implemented, and never leave a
+               half-pushed branch with no PR opened for it.
+            4. Do NOT merge anything yourself. Opening the PR is the end of your
+               responsibility for that issue — a separate Reviewer automation decides
+               whether it merges.
+            5. Do not add any AI/bot attribution to commits, PR bodies, or issue
+               comments. Git identity is already configured to the repository owner.
+            6. If a candidate issue has a genuine ambiguity, a design decision only a
+               human should make, a missing credential, a new dependency or tech
+               stack being considered, or anything with a real or potential cost:
+               stop working on that issue specifically, comment on it explaining
+               what's needed, label it `needs-input`, and move on to the next
+               candidate. Do not guess on judgment calls, and do not notify anyone
+               directly — the Brainstormer automation is solely responsible for
+               surfacing this to the human, on its own schedule.
+            7. If, while implementing an issue, you notice one clearly-scoped piece of
+               genuinely meaningful follow-up work, you may open at most ONE new
+               issue for the whole run, labeled `needs-triage`, never `daily-task`
+               directly.
+            8. Keep each issue's diff proportional to its scope.
+
+  resolve-review-comments:
+    if: inputs.mode == 'resolve-comments'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Find PRs with requested changes
+        id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          prs=$(gh pr list --repo "${{ github.repository }}" --state open --json number,reviewDecision \
+            --jq '[.[] | select(.reviewDecision == "CHANGES_REQUESTED") | .number]')
+          echo "prs=$prs" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        if: steps.find.outputs.prs != '[]'
+        with:
+          fetch-depth: 0
+
+      - name: Configure git identity
+        if: steps.find.outputs.prs != '[]'
+        run: |
+          git config --global user.name "${{ github.repository_owner }}"
+          git config --global user.email "${{ github.repository_owner }}@users.noreply.github.com"
+
+      - name: Resolve feedback on each flagged PR
+        if: steps.find.outputs.prs != '[]'
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GH_PAT }}
+          bot_name: ${{ github.repository_owner }}
+          bot_id: ${{ github.repository_owner_id }}
+          claude_args: >-
+            --max-turns ${{ inputs.max_turns }}
+            --allowedTools "Read,Edit,Write,Glob,Grep,Bash(git *),Bash(gh *),Bash(npm *),Bash(pip *),Bash(pytest *),Bash(python *)"
+          prompt: |
+            PRs with requested changes: ${{ steps.find.outputs.prs }}
+
+            For each one: check out its branch, read the review comments via
+            `gh pr view <n> --repo ${{ github.repository }}` (its body carries the
+            Reviewer's stated reason) and `gh api repos/${{ github.repository }}/pulls/<n>/reviews`
+            for the full review history, address the specific feedback, commit, and
+            push to the SAME branch — do not open a new PR, the existing one updates
+            automatically. Do not pick up any new issues in this run.
