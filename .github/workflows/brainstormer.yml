@@ -57,9 +57,13 @@ jobs:
           set -euo pipefail
           number=$(gh issue list --repo "${{ github.repository }}" --search "Daily status in:title" --state open --json number --jq '.[0].number // empty')
           if [ -z "$number" ]; then
-            number=$(gh issue create --repo "${{ github.repository }}" --title "Daily status" \
+            # `gh issue create` has no --json output (confirmed: not in its
+            # --help), so re-query via the same --json lookup above rather
+            # than scraping its human-readable stdout for a trailing number.
+            gh issue create --repo "${{ github.repository }}" --title "Daily status" \
               --body "Persistent tracking issue. The Brainstormer comments here once a day; being assigned to it is what sends the notification." \
-              | grep -oE '[0-9]+$')
+              >/dev/null
+            number=$(gh issue list --repo "${{ github.repository }}" --search "Daily status in:title" --state open --json number --jq '.[0].number')
           fi
           echo "number=$number" >> "$GITHUB_OUTPUT"
 
