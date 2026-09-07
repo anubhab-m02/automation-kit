@@ -1,0 +1,231 @@
+name: Reviewer
+
+# Reusable workflow. Reviews every currently open PR in a hard-isolated
+# fresh context per PR (a separate matrix job invocation per PR — no
+# shared memory with the Coder run that produced it, and no shared
+# memory between one PR's review and another's). Submits a real GitHub
+# review via `gh pr review`, attempts an auto-merge using the workflow's
+# own non-admin token (see the implementation plan's Task 3 for why not
+# the admin-scoped GH_PAT), and writes a dated report committed via the
+# admin-scoped GH_PAT (this job only ever touches documentation paths).
+#
+# Verdicts come back as real structured JSON (--json-schema + the
+# action's `structured_output` output), not parsed from free-text —
+# there is no `output_text` output on this action, confirmed against
+# its real action.yml before writing this file.
+
+on:
+  workflow_call:
+    inputs:
+      max_turns:
+        required: false
+        type: number
+        default: 60
+      random_window_minutes:
+        required: false
+        type: number
+        default: 180
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: true
+      GH_PAT:
+        required: true
+
+jobs:
+  list-open-prs:
+    runs-on: ubuntu-latest
+    outputs:
+      pr_numbers: ${{ steps.list.outputs.pr_numbers }}
+    steps:
+      - name: Randomize start time within the target window
+        if: github.event_name == 'schedule'
+        env:
+          WINDOW_MINUTES: ${{ inputs.random_window_minutes }}
+        run: |
+          set -euo pipefail
+          sleep_secs=$(( RANDOM % (WINDOW_MINUTES * 60) ))
+          echo "Sleeping ${sleep_secs}s (up to ${WINDOW_MINUTES}m window) before starting..."
+          sleep "$sleep_secs"
+
+      - name: List open PRs
+        id: list
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          prs=$(gh pr list --repo "${{ github.repository }}" --state open --json number --jq '[.[].number]')
+          echo "pr_numbers=$prs" >> "$GITHUB_OUTPUT"
+
+  review-each-pr:
+    needs: list-open-prs
+    if: needs.list-open-prs.outputs.pr_numbers != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        pr_number: ${{ fromJson(needs.list-open-prs.outputs.pr_numbers) }}
+      fail-fast: false
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Review PR ${{ matrix.pr_number }} in an isolated context
+        id: review
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GH_PAT }}
+          allowedTools: "Read,Grep,Glob,Bash(git *),Bash(gh pr diff *),Bash(gh pr view *)"
+          claude_args: >-
+            --max-turns ${{ inputs.max_turns }}
+            --json-schema '{"type":"object","properties":{"verdict":{"type":"string","enum":["approve","request_changes"]},"reason":{"type":"string"}},"required":["verdict","reason"]}'
+          prompt: |
+            You are reviewing PR #${{ matrix.pr_number }} in ${{ github.repository }}
+            with NO knowledge of who wrote it, why, or what they were thinking — you
+            have never seen this repository's chat history and never will. Judge only
+            from the diff, the PR description, and this repository's own documented
+            standards (read CLAUDE.md, docs/ARCHITECTURE.md, and any spec/issue the PR
+            references).
+
+            1. Run `gh pr diff ${{ matrix.pr_number }}` and read the full diff.
+            2. Run `gh pr view ${{ matrix.pr_number }}` for its description and linked issue.
+            3. Check the sensitive-path denylist FIRST, before anything else: if the
+               diff touches any of `backend/auth/`, `backend/config_store.py`,
+               `.github/workflows/*`, anything migration-shaped, or
+               `backend/retrieval/search.py`, you MUST request changes regardless of
+               how correct the change otherwise looks — a passing diff on a sensitive
+               path still needs a human's explicit look, not just a clean test run.
+               State in your reason that this is a sensitive-path hold, not a
+               correctness objection, so a human reading it later knows the
+               distinction.
+            4. If no sensitive path was touched: check whether it matches the linked
+               issue's scope, follows this repo's documented standards, and doesn't
+               introduce anything outside its stated scope.
+            5. Return your verdict as the structured JSON output — do not use any
+               tool to modify the PR, comment on it, or submit a GitHub review
+               yourself. A separate step outside your control reads your verdict and
+               acts on it.
+
+      - name: Extract verdict and submit the real GitHub review
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          STRUCTURED_OUTPUT: ${{ steps.review.outputs.structured_output }}
+        run: |
+          set -euo pipefail
+          verdict=$(echo "$STRUCTURED_OUTPUT" | jq -r '.verdict')
+          reason=$(echo "$STRUCTURED_OUTPUT" | jq -r '.reason')
+
+          if [ "$verdict" = "approve" ]; then
+            gh pr review ${{ matrix.pr_number }} --repo "${{ github.repository }}" --approve --body "$reason"
+
+            # Merge attempt uses the workflow-scoped default token, NOT the
+            # admin-scoped GH_PAT — see Task 3 of the implementation plan.
+            # If branch protection isn't satisfied (checks still running,
+            # sensitive path flagged, etc.) this call fails and that failure
+            # is expected, not a bug — the PR simply stays open.
+            GH_TOKEN="${{ github.token }}" gh pr merge ${{ matrix.pr_number }} \
+              --repo "${{ github.repository }}" --squash --auto || \
+              echo "Merge not yet possible for PR #${{ matrix.pr_number }} — branch protection is doing its job."
+          else
+            gh pr review ${{ matrix.pr_number }} --repo "${{ github.repository }}" --request-changes --body "$reason"
+          fi
+
+          mkdir -p /tmp/verdicts
+          echo "{\"pr_number\": ${{ matrix.pr_number }}, \"verdict\": \"$verdict\", \"reason\": $(echo "$reason" | jq -Rs .)}" > "/tmp/verdicts/${{ matrix.pr_number }}.json"
+
+      - name: Upload this PR's verdict for the report-writing job
+        uses: actions/upload-artifact@v4
+        with:
+          name: verdict-${{ matrix.pr_number }}
+          path: /tmp/verdicts/${{ matrix.pr_number }}.json
+
+  write-report-and-trigger-coder:
+    needs: review-each-pr
+    if: always() && needs.review-each-pr.result != 'skipped'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download every PR's verdict
+        uses: actions/download-artifact@v4
+        with:
+          pattern: verdict-*
+          path: /tmp/verdicts
+          merge-multiple: true
+
+      - name: Fetch the report parser (public repo, no auth needed)
+        run: |
+          mkdir -p /tmp/automation-kit-scripts
+          curl -sf -o /tmp/automation-kit-scripts/parse_review_report.py \
+            https://raw.githubusercontent.com/anubhab-m02/automation-kit/main/scripts/parse_review_report.py
+          pip install --quiet pyyaml
+
+      - name: Assemble and commit the report
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          set -euo pipefail
+          git config --global user.name "${{ github.repository_owner }}"
+          git config --global user.email "${{ github.repository_owner }}@users.noreply.github.com"
+
+          today=$(date -u +%Y-%m-%d)
+          report_path="docs/superpowers/reports/${today}-review.md"
+          mkdir -p docs/superpowers/reports
+
+          {
+            echo "---"
+            echo "date: \"${today}\""
+            echo "verdicts:"
+            for f in /tmp/verdicts/*.json; do
+              [ -e "$f" ] || continue
+              pr=$(jq -r '.pr_number' "$f")
+              verdict=$(jq -r '.verdict' "$f")
+              reason=$(jq -r '.reason' "$f")
+              echo "  - pr_number: $pr"
+              echo "    verdict: $verdict"
+              echo "    reason: $(jq -n --arg r "$reason" '$r')"
+            done
+            echo "findings: []"
+            echo "---"
+            echo ""
+            echo "# Review report — ${today}"
+            echo ""
+            echo "## PRs reviewed"
+            echo ""
+            for f in /tmp/verdicts/*.json; do
+              [ -e "$f" ] || continue
+              pr=$(jq -r '.pr_number' "$f")
+              verdict=$(jq -r '.verdict' "$f")
+              reason=$(jq -r '.reason' "$f")
+              echo "PR #${pr}: **${verdict}** — ${reason}"
+              echo ""
+            done
+            echo "## Findings not tied to a specific PR"
+            echo ""
+            echo "None this run — per-PR reviews only surface a verdict today; see"
+            echo "the implementation plan's Task 5 note on this known gap."
+          } > "$report_path"
+
+          # Fail loudly here rather than commit a report the Issue Generator
+          # can't actually parse later.
+          python3 -c "
+          import sys
+          sys.path.insert(0, '/tmp/automation-kit-scripts')
+          from parse_review_report import parse_review_report
+          parse_review_report(open('$report_path').read())
+          print('report parses correctly')
+          "
+
+          git add "$report_path"
+          git commit -m "docs: add review report for ${today}"
+          git push origin HEAD:main
+
+      - name: Trigger the Coder's comment-resolution run
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          gh api repos/${{ github.repository }}/dispatches \
+            -f event_type=resolve-review-comments
