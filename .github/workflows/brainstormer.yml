@@ -75,8 +75,9 @@ jobs:
           github_token: ${{ secrets.GH_PAT }}
           bot_name: ${{ github.repository_owner }}
           bot_id: ${{ github.repository_owner_id }}
-          allowedTools: "Read,Edit,Write,Grep,Glob,Bash(git *),Bash(gh *)"
-          claude_args: --max-turns ${{ inputs.max_turns }}
+          claude_args: >-
+            --max-turns ${{ inputs.max_turns }}
+            --allowedTools "Read,Edit,Write,Grep,Glob,Bash(git *),Bash(gh *)"
           prompt: |
             You are the product manager for this repository, running once a day.
 
