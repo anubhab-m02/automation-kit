@@ -111,7 +111,17 @@ jobs:
 
       - name: Extract verdict and submit the real GitHub review
         env:
-          GH_TOKEN: ${{ secrets.GH_PAT }}
+          # Deliberately the workflow-scoped default token, NOT the
+          # admin-scoped GH_PAT: GH_PAT is the repository owner's own
+          # identity, which also authors every Coder-opened PR — GitHub
+          # refuses to let one identity submit a review on its own PR
+          # ("Can not request changes on your own pull request"),
+          # confirmed live during Task 14's dry run. Using github.token
+          # here means the Reviewer's approval comes from a genuinely
+          # distinct identity than whatever opened the PR, which is more
+          # consistent with the hard-isolation principle than the
+          # cosmetic goal of every action showing as the repo owner.
+          GH_TOKEN: ${{ github.token }}
           STRUCTURED_OUTPUT: ${{ steps.review.outputs.structured_output }}
         run: |
           set -euo pipefail
@@ -121,12 +131,10 @@ jobs:
           if [ "$verdict" = "approve" ]; then
             gh pr review ${{ matrix.pr_number }} --repo "${{ github.repository }}" --approve --body "$reason"
 
-            # Merge attempt uses the workflow-scoped default token, NOT the
-            # admin-scoped GH_PAT — see Task 3 of the implementation plan.
             # If branch protection isn't satisfied (checks still running,
             # sensitive path flagged, etc.) this call fails and that failure
             # is expected, not a bug — the PR simply stays open.
-            GH_TOKEN="${{ github.token }}" gh pr merge ${{ matrix.pr_number }} \
+            gh pr merge ${{ matrix.pr_number }} \
               --repo "${{ github.repository }}" --squash --auto || \
               echo "Merge not yet possible for PR #${{ matrix.pr_number }} — branch protection is doing its job."
           else
