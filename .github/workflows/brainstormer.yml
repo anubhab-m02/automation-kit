@@ -117,6 +117,10 @@ jobs:
               git commit -m "docs: roadmap update, $(date -u +%Y-%m-%d)"
               git push origin HEAD:${{ github.event.repository.default_branch }}
 
+            Do not add any AI/bot attribution to commits, PR bodies, or issue comments
+            (no "Co-Authored-By: Claude", no "Generated with Claude Code" — commits and
+            comments should read as if the repository owner wrote them).
+
             If that push is rejected (non-fast-forward — the default branch moved
             since you checked it out, e.g. the Reviewer merged something around the
             same time), do NOT force-push. Instead: `git fetch origin

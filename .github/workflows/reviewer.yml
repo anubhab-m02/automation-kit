@@ -109,6 +109,10 @@ jobs:
                yourself. A separate step outside your control reads your verdict and
                acts on it.
 
+            Do not add any AI/bot attribution anywhere (no "Co-Authored-By: Claude",
+            no "Generated with Claude Code") — your `reason` text is posted verbatim
+            as the review body.
+
       - name: Extract verdict and submit the real GitHub review
         env:
           # Deliberately the workflow-scoped default token, NOT the

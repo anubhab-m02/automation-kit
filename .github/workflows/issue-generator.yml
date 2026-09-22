@@ -105,3 +105,6 @@ jobs:
             Do not create more than 10 new issues in a single run — if there is more
             backlog than that, file the 10 most load-bearing (fewest dependencies on
             things not yet built) and leave the rest for tomorrow's run.
+
+            Do not add any AI/bot attribution to commits, PR bodies, or issue
+            comments (no "Co-Authored-By: Claude", no "Generated with Claude Code").
