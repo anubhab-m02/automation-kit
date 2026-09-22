@@ -55,15 +55,25 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
           set -euo pipefail
-          number=$(gh issue list --repo "${{ github.repository }}" --search "Daily status in:title" --state open --json number --jq '.[0].number // empty')
+          # Deliberately NOT `gh issue list --search`: the Search API is
+          # only eventually consistent, and re-querying it immediately
+          # after `gh issue create` can return empty even though the issue
+          # exists (confirmed live during Task 14's dry run — the create
+          # succeeded, the very next search-based lookup came back empty,
+          # and `gh issue edit` then failed with "requires at least 1
+          # arg(s), only received 0"). The plain (non-search) issue list +
+          # client-side title filter hits the regular Issues API instead,
+          # which is immediately consistent.
+          number=$(gh issue list --repo "${{ github.repository }}" --state open --json number,title --jq '[.[] | select(.title == "Daily status")][0].number // empty')
           if [ -z "$number" ]; then
             # `gh issue create` has no --json output (confirmed: not in its
-            # --help), so re-query via the same --json lookup above rather
-            # than scraping its human-readable stdout for a trailing number.
+            # --help), so re-query via the same non-search lookup above
+            # rather than scraping its human-readable stdout for a
+            # trailing number.
             gh issue create --repo "${{ github.repository }}" --title "Daily status" \
               --body "Persistent tracking issue. The Brainstormer comments here once a day; being assigned to it is what sends the notification." \
               >/dev/null
-            number=$(gh issue list --repo "${{ github.repository }}" --search "Daily status in:title" --state open --json number --jq '.[0].number')
+            number=$(gh issue list --repo "${{ github.repository }}" --state open --json number,title --jq '[.[] | select(.title == "Daily status")][0].number')
           fi
           echo "number=$number" >> "$GITHUB_OUTPUT"
 
