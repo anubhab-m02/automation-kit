@@ -229,7 +229,22 @@ jobs:
 
           git add "$report_path"
           git commit -m "docs: add review report for ${today}"
-          git push origin HEAD:main
+
+          # main can move between this job's checkout and this push — the
+          # review-each-pr matrix jobs this one `needs` may themselves have
+          # just merged a PR to main (confirmed live during Task 14's dry
+          # run: a report push was rejected as non-fast-forward because a
+          # sibling job's merge landed first). Fetch, rebase, and retry a
+          # few times rather than assuming main is still where it was.
+          for attempt in 1 2 3; do
+            git fetch origin main
+            if git rebase origin/main && git push origin HEAD:main; then
+              break
+            fi
+            echo "Push attempt $attempt failed (main moved again) — retrying..."
+            git rebase --abort 2>/dev/null || true
+            sleep 5
+          done
 
       - name: Trigger the Coder's comment-resolution run
         env:

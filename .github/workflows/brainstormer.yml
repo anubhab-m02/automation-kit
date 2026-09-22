@@ -107,6 +107,14 @@ jobs:
               git commit -m "docs: roadmap update, $(date -u +%Y-%m-%d)"
               git push origin HEAD:${{ github.event.repository.default_branch }}
 
+            If that push is rejected (non-fast-forward — the default branch moved
+            since you checked it out, e.g. the Reviewer merged something around the
+            same time), do NOT force-push. Instead: `git fetch origin
+            ${{ github.event.repository.default_branch }}`, then `git rebase
+            origin/${{ github.event.repository.default_branch }}`, then push again.
+            Retry this up to 3 times before giving up and reporting the conflict in
+            your daily summary instead.
+
             Do not open a PR for this.
 
             FINALLY, write a short daily summary (issues completed since yesterday, PRs
