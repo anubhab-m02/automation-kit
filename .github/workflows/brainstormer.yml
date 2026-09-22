@@ -1,0 +1,126 @@
+name: Brainstormer
+
+# Reusable workflow. The product manager: reads steering issues (checked
+# first, binding), the latest review report, open needs-input issues, and
+# security alerts; updates ROADMAP.md directly (no PR gate — see the
+# automation org design doc for why); sends the one daily notification by
+# commenting on and assigning the human to a persistent tracking issue.
+#
+# Uses the admin-scoped GH_PAT to push ROADMAP.md directly — safe because
+# this workflow only ever touches that one documentation file, never
+# application code (see the implementation plan's Task 3).
+
+on:
+  workflow_call:
+    inputs:
+      max_turns:
+        required: false
+        type: number
+        default: 100
+      random_window_minutes:
+        required: false
+        type: number
+        default: 180
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: true
+      GH_PAT:
+        required: true
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Randomize start time within the target window
+        if: github.event_name == 'schedule'
+        env:
+          WINDOW_MINUTES: ${{ inputs.random_window_minutes }}
+        run: |
+          set -euo pipefail
+          sleep_secs=$(( RANDOM % (WINDOW_MINUTES * 60) ))
+          sleep "$sleep_secs"
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git identity
+        run: |
+          git config --global user.name "${{ github.repository_owner }}"
+          git config --global user.email "${{ github.repository_owner }}@users.noreply.github.com"
+
+      - name: Ensure the daily tracking issue exists
+        id: tracking
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          set -euo pipefail
+          number=$(gh issue list --repo "${{ github.repository }}" --search "Daily status in:title" --state open --json number --jq '.[0].number // empty')
+          if [ -z "$number" ]; then
+            # `gh issue create` has no --json output (confirmed: not in its
+            # --help), so re-query via the same --json lookup above rather
+            # than scraping its human-readable stdout for a trailing number.
+            gh issue create --repo "${{ github.repository }}" --title "Daily status" \
+              --body "Persistent tracking issue. The Brainstormer comments here once a day; being assigned to it is what sends the notification." \
+              >/dev/null
+            number=$(gh issue list --repo "${{ github.repository }}" --search "Daily status in:title" --state open --json number --jq '.[0].number')
+          fi
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+
+      - name: Brainstorm and update ROADMAP.md
+        id: brainstorm
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GH_PAT }}
+          bot_name: ${{ github.repository_owner }}
+          bot_id: ${{ github.repository_owner_id }}
+          allowedTools: "Read,Edit,Write,Grep,Glob,Bash(git *),Bash(gh *)"
+          claude_args: --max-turns ${{ inputs.max_turns }}
+          prompt: |
+            You are the product manager for this repository, running once a day.
+
+            FIRST, before anything else: check for open issues labeled `steering`
+            (`gh issue list --repo ${{ github.repository }} --label steering --state open`).
+            If any exist, their content is BINDING instruction that overrides your own
+            judgment for this run. After incorporating each one into ROADMAP.md, close
+            it with a comment stating specifically what you changed as a result
+            (`gh issue close <n> --repo ${{ github.repository }} --comment "..."`).
+
+            THEN read, in order: the most recent file in docs/superpowers/reports/ (if
+            any), open issues labeled `needs-input`
+            (`gh issue list --repo ${{ github.repository }} --label needs-input --state open`),
+            ROADMAP.md itself, and the output of
+            `gh api repos/${{ github.repository }}/dependabot/alerts` (if this command
+            fails due to missing token scope, note that explicitly in your summary
+            rather than silently skipping it).
+
+            Decide what the product needs next: fold review-report findings and
+            needs-input blockers into ROADMAP.md as concrete next steps, add any real
+            security alerts as roadmap items, and — using your own judgment, not only
+            reacting to inputs — propose genuinely new ideas if you see a real gap.
+            Edit ROADMAP.md directly, then commit and push directly to the default
+            branch:
+
+              git add ROADMAP.md
+              git commit -m "docs: roadmap update, $(date -u +%Y-%m-%d)"
+              git push origin HEAD:${{ github.event.repository.default_branch }}
+
+            Do not open a PR for this.
+
+            FINALLY, write a short daily summary (issues completed since yesterday, PRs
+            merged, anything needing human attention with a `[NEEDS ATTENTION]` prefix
+            per line) and post it as a comment on issue
+            #${{ steps.tracking.outputs.number }}:
+
+              gh issue comment ${{ steps.tracking.outputs.number }} --repo ${{ github.repository }} --body "..."
+
+            Post this comment even on a quiet day — a short "nothing needs attention
+            today" is still posted, every day, without exception.
+
+      - name: Assign the human to trigger the notification
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          gh issue edit ${{ steps.tracking.outputs.number }} --repo "${{ github.repository }}" \
+            --add-assignee "${{ github.repository_owner }}"
