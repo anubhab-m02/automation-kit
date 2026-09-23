@@ -107,9 +107,19 @@ jobs:
             rather than silently skipping it).
 
             Decide what the product needs next: fold review-report findings and
-            needs-input blockers into ROADMAP.md as concrete next steps, add any real
-            security alerts as roadmap items, and — using your own judgment, not only
-            reacting to inputs — propose genuinely new ideas if you see a real gap.
+            needs-input blockers into ROADMAP.md as concrete next steps, and — using
+            your own judgment, not only reacting to inputs — propose genuinely new
+            ideas if you see a real gap.
+
+            For security alerts: before adding one as a roadmap item, check
+            `gh pr list --repo ${{ github.repository }} --state all --search "<package
+            name> in:title"` for a Dependabot PR already covering it. If one exists
+            (open or merged), skip it — Dependabot's own PR plus the Reviewer's
+            auto-merge already handle it end-to-end, and roadmapping it too just
+            creates an issue nothing will ever close. Only add an alert as a roadmap
+            item when no Dependabot PR exists yet (e.g. no fixed version available,
+            like an unpatched chromadb CVE needing a `needs-input` risk-acceptance
+            call) — those are the ones that actually need a human or the Coder.
             Edit ROADMAP.md directly, then commit and push directly to the default
             branch:
 
