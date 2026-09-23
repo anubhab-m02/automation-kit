@@ -159,7 +159,19 @@ jobs:
     if: always() && needs.review-each-pr.result != 'skipped'
     runs-on: ubuntu-latest
     steps:
+      # `token:` here is what actions/checkout wires into git's credential
+      # helper for `git push` later in this job — it is NOT the same thing
+      # as setting `GH_TOKEN` in a step's env, which only affects `gh` CLI
+      # calls. Without this, the later `git push origin HEAD:main` silently
+      # authenticates as github.token (the non-admin workflow token) and
+      # gets rejected by branch protection on every attempt — confirmed
+      # live: the job still reported success because the retry loop below
+      # didn't check its own outcome, so this ran unnoticed since the
+      # workflow was first written and no review report was ever actually
+      # committed.
       - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_PAT }}
 
       - name: Download every PR's verdict
         uses: actions/download-artifact@v4
@@ -240,15 +252,22 @@ jobs:
           # run: a report push was rejected as non-fast-forward because a
           # sibling job's merge landed first). Fetch, rebase, and retry a
           # few times rather than assuming main is still where it was.
+          pushed=false
           for attempt in 1 2 3; do
             git fetch origin main
             if git rebase origin/main && git push origin HEAD:main; then
+              pushed=true
               break
             fi
             echo "Push attempt $attempt failed (main moved again) — retrying..."
             git rebase --abort 2>/dev/null || true
             sleep 5
           done
+
+          if [ "$pushed" != true ]; then
+            echo "::error::Failed to push the review report after 3 attempts — failing the job instead of reporting a false success."
+            exit 1
+          fi
 
       - name: Trigger the Coder's comment-resolution run
         env:
