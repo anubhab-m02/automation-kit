@@ -126,6 +126,18 @@ jobs:
           # consistent with the hard-isolation principle than the
           # cosmetic goal of every action showing as the repo owner.
           GH_TOKEN: ${{ github.token }}
+          # Only the review-submission call needs github.token (to dodge
+          # the self-review restriction above). The merge itself has no
+          # such restriction — and critically, a merge performed with the
+          # default GITHUB_TOKEN does NOT fire downstream `pull_request`
+          # events on this repo (GitHub deliberately suppresses recursive
+          # workflow triggering for actions taken by the default token).
+          # Confirmed live: adr-engine's own `pull_request: closed` linked-
+          # issue-closer (added for issue #190) never fired for a single
+          # bot-merged PR because of this — the Brainstormer diagnosed it
+          # empirically and reopened #190. GH_PAT is a real PAT, so a merge
+          # performed with it does fire those events normally.
+          MERGE_TOKEN: ${{ secrets.GH_PAT }}
           STRUCTURED_OUTPUT: ${{ steps.review.outputs.structured_output }}
         run: |
           set -euo pipefail
@@ -138,7 +150,7 @@ jobs:
             # If branch protection isn't satisfied (checks still running,
             # sensitive path flagged, etc.) this call fails and that failure
             # is expected, not a bug — the PR simply stays open.
-            gh pr merge ${{ matrix.pr_number }} \
+            GH_TOKEN="$MERGE_TOKEN" gh pr merge ${{ matrix.pr_number }} \
               --repo "${{ github.repository }}" --squash --auto || \
               echo "Merge not yet possible for PR #${{ matrix.pr_number }} — branch protection is doing its job."
           else
