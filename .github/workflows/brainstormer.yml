@@ -121,6 +121,28 @@ jobs:
             like an unpatched chromadb CVE needing a `needs-input` risk-acceptance
             call) — those are the ones that actually need a human or the Coder.
 
+            WORK SUPPLY IS YOUR CORE DUTY. A real team is never idle, and "nothing
+            to do today" is a failure of this role, not a status. Every run, count
+            the eligible backlog (`gh issue list --label daily-task --state open`,
+            minus `in-pr` and `needs-input`). If fewer than 10 are eligible, or
+            ROADMAP.md's "Next up" list has fewer than 10 unstarted items, you MUST
+            add concrete, ≤150-line-sized work until it does. Where to find it, in
+            order:
+            1. The next unstarted tracks/waves in the design docs the roadmap points
+               to (e.g. docs/superpowers/specs/*-design.md). Respect any quality
+               gate those docs define; if a gate is not yet cleared, the critical
+               path is clearing it, so keep that work first and visible.
+            2. Gate-independent work, found by actually reading the code: modules or
+               branches with no tests, missing error/empty/loading states, spec
+               gaps between docs/UI-DESIGN.md and the frontend, accessibility
+               gaps, slow or duplicated code, TODO/FIXME comments, stale docs,
+               lint/build warnings, and small refactors that delete code.
+            3. Real user-facing improvements consistent with PRODUCT.md and clear of
+               its Non-goals.
+            Each item needs exact files and checkable acceptance criteria. Never
+            propose work in the Non-goals, work needing new paid services, or
+            anything touching the sensitive-path denylist as a daily-task.
+
             ROADMAP.md hygiene (this runs unattended for months; the file is read in
             full by other automations, so it must not grow without bound):
             - Do NOT append a dated "Update ..." section on a quiet day or when

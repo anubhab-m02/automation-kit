@@ -102,8 +102,18 @@ jobs:
                resolved or no longer applicable, close it with a comment citing which
                report/PR resolved it.
 
-            Do not create more than 10 new issues in a single run — if there is more
-            backlog than that, file the 10 most load-bearing (fewest dependencies on
+            BACKLOG FLOOR: the Coder takes up to 5 issues a day, so the eligible
+            backlog (open `daily-task`, minus `in-pr` and `needs-input`) must never
+            fall below 10. After the steps above, count it. If it is below 10 and
+            ROADMAP.md has no more unfiled items, do not stop: read the code and
+            docs yourself and file well-scoped `daily-task` issues for real,
+            checkable work (missing tests, untested branches, spec-vs-code gaps,
+            error/empty/loading states, accessibility fixes, dead code to delete,
+            stale docs). Dedup against all existing issues first, as above. An empty
+            queue is never an acceptable outcome of this run.
+
+            Do not create more than 15 new issues in a single run — if there is more
+            backlog than that, file the 15 most load-bearing (fewest dependencies on
             things not yet built) and leave the rest for tomorrow's run.
 
             Do not add any AI/bot attribution to commits, PR bodies, or issue
