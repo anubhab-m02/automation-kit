@@ -47,13 +47,27 @@ jobs:
           echo "Sleeping ${sleep_secs}s (up to ${WINDOW_MINUTES}m window) before starting..."
           sleep "$sleep_secs"
 
-      - name: List open PRs
+      - name: List open PRs (closing unmergeable ones so the Coder regenerates them)
         id: list
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
           set -euo pipefail
-          prs=$(gh pr list --repo "${{ github.repository }}" --state open --json number --jq '[.[].number]')
+          repo="${{ github.repository }}"
+          # A PR that conflicts with main can never merge and nothing else
+          # rebases it (found live: PR #206 was re-approved daily for days).
+          # Close it and drop `in-pr` from the issues it claimed so the
+          # Coder picks them up again against current main.
+          for n in $(gh pr list --repo "$repo" --state open --json number,mergeable \
+                       --jq '.[] | select(.mergeable == "CONFLICTING") | .number'); do
+            body=$(gh pr view "$n" --repo "$repo" --json body --jq .body)
+            gh pr close "$n" --repo "$repo" --delete-branch \
+              --comment "Closing: this PR conflicts with main and can't merge. The linked issue is released so the Coder regenerates it against current main."
+            for i in $(echo "$body" | grep -ioE "(close[sd]?|fix(e[sd])?|resolve[sd]?) #[0-9]+" | grep -oE "[0-9]+" || true); do
+              gh issue edit "$i" --repo "$repo" --remove-label in-pr || true
+            done
+          done
+          prs=$(gh pr list --repo "$repo" --state open --json number --jq '[.[].number]')
           echo "pr_numbers=$prs" >> "$GITHUB_OUTPUT"
 
   review-each-pr:

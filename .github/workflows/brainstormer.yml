@@ -120,6 +120,23 @@ jobs:
             item when no Dependabot PR exists yet (e.g. no fixed version available,
             like an unpatched chromadb CVE needing a `needs-input` risk-acceptance
             call) — those are the ones that actually need a human or the Coder.
+
+            ROADMAP.md hygiene (this runs unattended for months; the file is read in
+            full by other automations, so it must not grow without bound):
+            - Do NOT append a dated "Update ..." section on a quiet day or when
+              nothing changed. If nothing changed, make no ROADMAP.md edit and no
+              commit; just post the daily status comment.
+            - When something does change, edit the relevant existing section in
+              place. Keep at most ONE dated "Latest update" section and replace it;
+              delete older dated update sections instead of stacking them.
+            - Keep ROADMAP.md under ~500 lines; condense or delete resolved items
+              (closed issues, merged work) rather than leaving them as history —
+              git already has the history.
+            - Dependency risks the owner already decided on (an issue closed with a
+              "risk accepted" decision, or listed under "Accepted risks") are
+              settled: do not re-raise them or open new needs-input issues for them.
+              Record decisions in an "Accepted risks" section.
+
             Edit ROADMAP.md directly, then commit and push directly to the default
             branch:
 
