@@ -148,6 +148,7 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          allowed_bots: "github-actions"
           github_token: ${{ secrets.GH_PAT }}
           bot_name: ${{ github.repository_owner }}
           bot_id: ${{ github.repository_owner_id }}
@@ -231,6 +232,7 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          allowed_bots: "github-actions"
           # GH_PAT here is for commit/PR identity attribution only (same
           # reason the original single-automation design used it) — this
           # step only ever pushes to an already-open PR's own branch,
